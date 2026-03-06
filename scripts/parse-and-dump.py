@@ -77,23 +77,29 @@ def main() -> None:
     else:
         max_interesting_cells = DEFAULT_MAX_INTERESTING_CELLS
 
-    for name, cells in candidates:
-        num = len(cells)
-        print(f"{name}: ({num} cells in range)")
-        print("\t", end="")
+    with open("_temp/named-ranges-dump.txt", "w", encoding="utf-8") as f:
+        for idx, (name, cells) in enumerate(candidates):
+            num = len(cells)
+            print(f"{idx}: {name}: ({num} cells in range)")
+            f.write(f"{idx}: {name}: ({num} cells in range)\n")
+            print("\t", end="")
+            f.write("\t") 
 
-        if all([x is None for x in cells]):
-            print("(all cells empty)")
-            continue
+            if all([x is None for x in cells]):
+                print("(all cells empty)")
+                continue
 
-        if max_interesting_cells and (total := len(cells)) > max_interesting_cells:
-            size = int(max_interesting_cells / 2)
-            cells = (
-                cells[:size]
-                + [f"… supressed {total - max_interesting_cells} cell values …"]
-                + cells[-size:]
-            )
-        print(*cells, sep="\n\t")
+            if max_interesting_cells and (total := len(cells)) > max_interesting_cells:
+                size = int(max_interesting_cells / 2)
+                cells = (
+                    cells[:size]
+                    + [f"… supressed {total - max_interesting_cells} cell values …"]
+                    + cells[-size:]
+                )
+            print(*cells, sep="\n\t")
+            f.write("\n\t".join(str(cell) for cell in cells) + "\n")    
+            # if idx % 200 == 0 and idx != 0:
+            #     input("Displayed 400 named ranges, press Enter to continue...")
 
     if errors:
         exitCode = 1
