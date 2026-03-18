@@ -142,6 +142,55 @@ _EXCLUDED_FIELDS: dict[str, Any] = {
 }
 
 
+_ABBREVIATIONS: dict[str, str] = {
+    "information_on_the_report_necessary_for_XBRL": "info_xbrl",
+    "information_on_previous_reporting_period": "info_prev_period",
+    "b1_basis_for_preparation_and_other_undertakings_general_information": "b1_basis_prep",
+    "b1_list_of_subsidiaries": "b1_subsidiaries",
+    "b1_disclosure_of_sustainability_related_certifications_or_labels": "b1_certifications",
+    "b1_list_of_sites": "b1_sites",
+    "b2_practices_policies_and_future_initiatives_for_transitioning_towards_a_more_sustainable_economy": "b2_practices_policies",
+    "b2_cooperative_specific_disclosures": "b2_coop_disclosures",
+    "c2_description_of_practices_policies_and_future_initiatives_for_transitioning_towards_a_more_sustainable_economy": "c2_practices_policies",
+    "c1_strategy_business_model_and_sustainability": "c1_strategy",
+    "c1_strategy_business_model_and_sustainability_if_applicable": "c1_strategy_if_applicable",
+    "disclosure_of_any_other_general_and_or_entity_specific_information_on_the_reporting_period": "other_general_info",
+    "b3_total_energy_consumption_in_MWh": "b3_total_energy",
+    "b3_breakdown_of_energy_consumption_in_MWh": "b3_energy_breakdown",
+    "b3_estimated_greenhouse_gas_emissions_considering_the_GHG_protocol_version_2004_in_tCO2e": "b3_estimated_ghg_emissions",
+    "c3_GHG_reduction_targets_in_tC02e": "c3_ghg_targets",
+    "c3_disclosure_of_list_of_main_actions_the_entity_seeks_in_order_to_achieve_its_targets": "c3_main_actions",
+    "c3_transition_plan_for_undertakings_operating_in_high_climate_impact_sectors": "c3_transition_plan",
+    "b3_greenhouse_gas_emission_intensity_per_turnover": "b3_ghg_intensity",
+    "b4_pollution_of_air_water_and_soil": "b4_pollution",
+    "b5_sites_in_biodiversity_sensitive_areas": "b5_biodiversity_sites",
+    "b5_biodiversity_land_use": "b5_land_use",
+    "b6_water_withdrawal": "b6_water_withdrawal",
+    "b6_water_consumption": "b6_water_consumption",
+    "b7_description_of_circular_economy_principles": "b7_circular_economy",
+    "b7_waste_generated": "b7_waste",
+    "b7_annual_mass_flow_of_relevant_materials_used": "b7_mass_flow",
+    "c4_climate_risks": "c4_climate_risks",
+    "disclosure_of_any_other_environmental_and_or_entity_specific_enviromental_disclosures": "other_environmental",
+    "b8_workforce_general_characteristics_type_of_contract": "b8_workforce_contract",
+    "b8_workforce_general_characteristics_gender": "b8_workforce_gender",
+    "b8_workforce_general_characteristics_country_of_employment": "b8_workforce_country",
+    "b8_workforce_general_characteristics_turnover_rate": "b8_workforce_turnover",
+    "b9_workforce_health_and_safety": "b9_health_safety",
+    "b10_workforce_remuneration_collective_bargaining_and_training": "b10_remuneration_training",
+    "b10_workforce_remuneration_collective_bargaining_and_training_always_reported": "b10_remuneration_training_always",
+    "c5_additional_general_workforce_characteristics": "c5_additional_workforce",
+    "c6_additional_own_workforce_information_human_rights_policies_and_processes": "c6_human_rights",
+    "c7_severe_negative_human_rights_incidents": "c7_negative_hr_incidents",
+    "disclosure_of_any_other_social_and_or_entity_specific_social_disclosures": "other_social",
+    "b11_convictions_and_fines_for_corruption_and_bribery": "b11_corruption_fines",
+    "c8_revenues_from_certain_sectors": "c8_sector_revenues",
+    "c8_exclusion_from_EU_reference_benchmarks": "c8_eu_benchmarks",
+    "c9_gender_diversity_ratio_in_the_governance_body": "c9_gender_diversity",
+    "disclosure_of_any_other_governance_and_or_entity_specific_governance_disclosures": "other_governance",
+}
+
+
 def _should_exclude_field(section_id: str, field: dict) -> bool:
     """Return True if *field* should be excluded from survey output."""
     # Section-specific exclusion rules
@@ -175,9 +224,14 @@ def _make_question_id(section_id: str, field: dict, field_index: int = 0) -> str
     """
     Build a unique question ID.
 
-    Format: {SURVEY_PREFIX}_{section_short}_{field_short}
-    where section_short and field_short are 5-char hashes.
+    Format: {survey_abbrev}_{field_short}
+    where survey_abbrev is the abbreviated section name from _ABBREVIATIONS
+    (falling back to SURVEY_PREFIX if not found) and field_short is a stable
+    5-char alphanumeric hash derived from the section, field identity, and
+    field index.
     """
+    prefix = _ABBREVIATIONS.get(section_id, SURVEY_PREFIX)
+
     field_key = (
         field.get("qname") or field.get("fieldId") or field.get("labelKey", "unknown")
     )
@@ -191,14 +245,9 @@ def _make_question_id(section_id: str, field: dict, field_index: int = 0) -> str
     if field.get("rowLabel"):
         row_key = field["rowLabel"].get("key", "")
 
-    composite = f"{section_id}::{field_key}::{col_key}::{row_key}"
-    candidate = f"{SURVEY_PREFIX}_{_short_id(composite)}"
-
-    # If this is an ambiguous case (e.g. same qname in multiple rows without
-    # unique row labels), append the field index to guarantee uniqueness.
-    # We always include the index in the hash to produce stable IDs.
-    composite_with_idx = f"{composite}::{field_index}"
-    return f"{SURVEY_PREFIX}_{_short_id(composite_with_idx)}"
+    # Always include the field index in the hash to produce stable, unique IDs.
+    composite = f"{section_id}::{field_key}::{col_key}::{row_key}::{field_index}"
+    return f"{prefix}_{_short_id(composite)}"
 
 
 def _is_instructional_text(text: str) -> bool:
@@ -298,6 +347,31 @@ def _build_question_name(
     # b1_list_of_sites) — fall through to XBRL label instead.
     row_usable = row_tlk and not _is_instructional_text(row_text)
     col_usable = col_tlk and not _is_instructional_text(col_text)
+
+    # For XBRL fields whose rowLabel was assigned by the "nearest row above"
+    # fallback, the rowLabel key may not semantically match the field.
+    # When the field has its own labelKey that differs from the rowLabel key
+    # AND resolves to a proper template_label display name, prefer the
+    # field's own label (e.g. "Gender diversity ratio in governance body"
+    # instead of "Number of male board members…").
+    if (
+        row_usable
+        and field.get("qname")
+        and field.get("labelKey")
+        and row_label
+        and row_label.get("key") != field.get("labelKey")
+    ):
+        own_label_key = f"template_label_{field['labelKey']}"
+        own_label_text = _resolve_template_label(own_label_key, defined_names)
+        # Only skip the rowLabel if the field's own label resolves to a
+        # non-fallback, non-instructional value (i.e. the defined name
+        # exists and the resolution didn't just echo the key back).
+        if (
+            own_label_text
+            and own_label_text != own_label_key
+            and not _is_instructional_text(own_label_text)
+        ):
+            row_usable = False
 
     if row_usable and col_usable:
         return f"{row_text} ({col_text})"
@@ -462,16 +536,14 @@ def _dedup_expandable_rows(fields: list[dict], section: dict) -> list[dict]:
     return result
 
 
-def _inject_synthetic_columns(
-    fields: list[dict], section: dict
-) -> list[dict]:
-    """Inject synthetic fields for orphaned column labels.
+def _inject_synthetic_columns(fields: list[dict], section: dict) -> list[dict]:
+    """Inject synthetic fields for orphaned column/index labels.
 
-    Some expandable-table sections have column labels (e.g. "Pollutant",
-    "Type of waste") for which the parser emitted no data field because
-    the column holds a dimension axis value rather than an XBRL data
-    point.  This function inserts a synthetic field for each such column
-    so that the survey contains a question for it.
+    Some expandable-table sections have column or index labels (e.g.
+    "Pollutant", "Type of waste") for which the parser emitted no data
+    field because the column holds a dimension axis value rather than an
+    XBRL data point.  This function inserts a synthetic field for each
+    such label so that the survey contains a question for it.
 
     Synthetic fields are defined in ``_SYNTHETIC_COLUMNS`` and inserted
     at the front of the table fields (before the first field with a
@@ -481,7 +553,7 @@ def _inject_synthetic_columns(
     col_labels = section.get("columnLabels") or {}
     idx_labels = section.get("indexLabels") or {}
 
-    if not col_labels:
+    if not col_labels and not idx_labels:
         return fields
 
     # Which column keys already have a matching field?
@@ -491,15 +563,19 @@ def _inject_synthetic_columns(
         if cl:
             field_col_keys.add(cl.get("key", ""))
 
-    idx_keys = {v.get("key", "") for v in idx_labels.values()}
-
-    # Find orphaned columns that have a synthetic definition
-    synthetics_to_add: list[dict] = []
+    # Merge all label sources (column + index) for synthetic lookup
+    all_labels: dict[str, dict] = {}
     for col_letter in sorted(col_labels.keys()):
-        cl = col_labels[col_letter]
-        col_key = cl.get("key", "")
-        if col_key in field_col_keys or col_key in idx_keys:
-            continue  # already covered
+        all_labels[col_letter] = col_labels[col_letter]
+    for col_letter in sorted(idx_labels.keys()):
+        all_labels[f"idx_{col_letter}"] = idx_labels[col_letter]
+
+    # Find orphaned labels that have a synthetic definition
+    synthetics_to_add: list[dict] = []
+    for _label_key, label_desc in all_labels.items():
+        col_key = label_desc.get("key", "")
+        if col_key in field_col_keys:
+            continue  # already covered by an existing field
 
         synth_def = _SYNTHETIC_COLUMNS.get((section_id, col_key))
         if not synth_def:
@@ -508,7 +584,7 @@ def _inject_synthetic_columns(
         # Build a synthetic field dict with a columnLabel so it's
         # recognised as a table field by the ordering/dynamic logic.
         synth_field = dict(synth_def)
-        synth_field["columnLabel"] = cl  # attach the column label metadata
+        synth_field["columnLabel"] = label_desc  # attach the label metadata
         synth_field.setdefault("rowLabel", None)
         synth_field.setdefault("value", None)
         synthetics_to_add.append(synth_field)
@@ -524,11 +600,7 @@ def _inject_synthetic_columns(
             break
 
     if first_table_idx is not None:
-        return (
-            fields[:first_table_idx]
-            + synthetics_to_add
-            + fields[first_table_idx:]
-        )
+        return fields[:first_table_idx] + synthetics_to_add + fields[first_table_idx:]
     # No table fields at all — just append
     return fields + synthetics_to_add
 
@@ -590,7 +662,14 @@ def _build_help_text(field: dict) -> str:
 
 
 def _map_answer_type(field: dict) -> str:
-    """Map the report-facts inputType to a survey answer_type."""
+    """Map the report-facts inputType to a survey answer_type.
+
+    Fields marked ``isComputed`` in the report-facts JSON are auto-
+    calculated by the Excel template (their value cells have theme
+    tint ≈ 0.80) and should not require user input in the survey.
+    """
+    if field.get("isComputed"):
+        return "COMPUTED"
     input_type = field.get("inputType", "text")
     return _ANSWER_TYPE_MAP.get(input_type, "OPEN")
 
@@ -784,10 +863,10 @@ def convert_field_to_question(
     if options is not None:
         question["answer_options"] = options
 
-    # Required
+    # Required — computed fields are never required (auto-calculated)
     is_required = field.get("isRequired", False)
     validation = field.get("validation") or {}
-    if is_required or validation.get("required"):
+    if (is_required or validation.get("required")) and not field.get("isComputed"):
         question["required"] = True
 
     # Condition
@@ -963,19 +1042,66 @@ def build_global_id_lookup(
     return lookup
 
 
-def build_survey_wrapper(section: dict, questions: list[dict]) -> dict[str, Any]:
+def _build_section_header_lookup(
+    section_labels: dict[str, str],
+    sections: list[dict],
+) -> dict[str, str]:
+    """Build a mapping from ``sectionId`` → clean section header text.
+
+    Uses ``sectionLabels`` from report-facts.json, which is populated by
+    reading the formula of each section's header cell and extracting the
+    first ``template_label_*`` variable.  For example, the cell formula
+    ``=template_label_b2_cooperative_specific_disclosures & " " & …``
+    yields the key ``b2_cooperative_specific_disclosures`` whose resolved
+    value is ``"B2 - Cooperative specific disclosures"``.
+
+    The lookup key is the section's ``templateName`` with the leading
+    ``template_`` prefix stripped (which equals the key in ``sectionLabels``).
+    Falls back to a title derived from the ``sectionId`` when no match
+    is found.
+    """
+    result: dict[str, str] = {}
+    for section in sections:
+        sid = section["sectionId"]
+        template_name = section.get("templateName", "")
+        # Strip leading "template_" to get the sectionLabels key
+        key = (
+            template_name[len("template_") :]
+            if template_name.startswith("template_")
+            else template_name
+        )
+        header = section_labels.get(key)
+        if header:
+            result[sid] = header
+        else:
+            # Fallback: derive from sectionId
+            result[sid] = sid.replace("_", " ").strip().title()
+    return result
+
+
+def build_survey_wrapper(
+    section: dict,
+    questions: list[dict],
+    section_headers: dict[str, str],
+    *,
+    sort_index: int,
+) -> dict[str, Any]:
     """
     Wrap a section's questions in the survey object envelope.
     """
     section_id = section["sectionId"]
-    template_name = section.get("templateName", f"template_{section_id}")
 
-    # Derive a human-readable title from the sectionId
-    title = section_id.replace("_", " ").strip().title()
+    # Use the section header resolved from templateLabels as the title.
+    # Fall back to a title derived from the sectionId.
+    title = section_headers.get(section_id) or (
+        section_id.replace("_", " ").strip().title()
+    )
 
     return {
         "title": title,
-        "name": template_name,
+        "name": _ABBREVIATIONS[section_id],
+        "sort_index": sort_index,
+        "survey_group_name": section.get("sheet", ""),
         "language": "en",
         "survey_data_proxy": questions,
     }
@@ -1032,6 +1158,12 @@ def main() -> None:
     enum_lists = report.get("enumLists", {})
     defined_names = report.get("definedNames", {})
 
+    # Build section header lookup from sectionLabels (formula-derived, exact)
+    section_labels = report.get("sectionLabels", {})
+    section_headers = _build_section_header_lookup(
+        section_labels, report.get("sections", [])
+    )
+
     # Build global cross-section ID lookup for condition references
     global_id_lookup = build_global_id_lookup(report)
 
@@ -1050,7 +1182,7 @@ def main() -> None:
     # Write one JSON file per section, placed in its sheet directory
     all_combined: list[dict[str, Any]] = []
 
-    for section in report.get("sections", []):
+    for sort_index, section in enumerate(report.get("sections", [])):
         section_id = section.get("sectionId", "unknown")
         sheet_name = section.get("sheet", "Unknown")
         sheet_dir_name = _SHEET_FILE_MAP.get(
@@ -1061,7 +1193,12 @@ def main() -> None:
         section_questions = convert_section(
             section, enum_lists, global_id_lookup, defined_names
         )
-        survey_obj = build_survey_wrapper(section, section_questions)
+        survey_obj = build_survey_wrapper(
+            section,
+            section_questions,
+            section_headers,
+            sort_index=sort_index,
+        )
 
         # Write per-section file into the sheet directory
         section_path = output_dir / sheet_dir_name / f"{section_id}.json"

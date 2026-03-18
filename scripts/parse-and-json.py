@@ -412,6 +412,7 @@ class JsonExcelProcessor(ExcelProcessor):
         from openpyxl import load_workbook as _load_wb
 
         validation_rules: dict[str, dict] = {}
+        section_labels: dict[str, str] = {}
 
         try:
             wb_formulas = _load_wb(
@@ -465,8 +466,54 @@ class JsonExcelProcessor(ExcelProcessor):
             #   _vr_cell_id_map: (sheet, row, col) → identifier
             #     that resolves ANY cell ref to an XBRL name, yellow-cell
             #     template_label key, or None.
+
+            def _is_input_cell_fill(cell) -> bool:
+                """Return True if the cell has an input-cell fill colour.
+
+                Two fill patterns denote user-editable input cells in the
+                VSME template:
+                  1. Explicit yellow: RGB ``FFFFFF99``
+                  2. Light-gray theme: theme colour 0 with tint ≈ −0.15
+                     (used for numeric/boolean inputs that feed into
+                     calculated XBRL fields such as board-member counts
+                     and employee turnover figures).
+                """
+                if not (cell.fill and cell.fill.start_color):
+                    return False
+                sc = cell.fill.start_color
+                if sc.index == "FFFFFF99":
+                    return True
+                if (
+                    sc.type == "theme"
+                    and sc.index == 0
+                    and sc.tint is not None
+                    and abs(sc.tint + 0.1499984740745262) < 0.001
+                ):
+                    return True
+                return False
+
+            def _is_computed_cell_fill(cell) -> bool:
+                """Return True if the cell has a computed-cell fill colour.
+
+                Cells with theme colour 8 and tint ≈ 0.80 are
+                auto-calculated formula cells that require no user
+                input (e.g. total hours worked, accident rates,
+                turnover rates, gender ratios).
+                """
+                if not (cell.fill and cell.fill.start_color):
+                    return False
+                sc = cell.fill.start_color
+                if (
+                    sc.type == "theme"
+                    and sc.tint is not None
+                    and abs(sc.tint - 0.7999816888943144) < 0.001
+                ):
+                    return True
+                return False
+
             _vr_label_re = re.compile(r"^=?(template_label_\w+)")
             _yellow_cell_set: set[tuple[str, int, int]] = set()
+            _computed_cell_set: set[tuple[str, int, int]] = set()
             _vr_row_to_label: dict[tuple[str, int], str] = {}
             _vr_col_label: dict[tuple[str, int, int], str] = {}
 
@@ -475,7 +522,9 @@ class JsonExcelProcessor(ExcelProcessor):
                     continue
                 _ws_v = self._workbook[_sn]
                 _ws_f = wb_formulas[_sn]
-                # Collect yellow cell positions from the value workbook
+                # Collect input cell positions from the value workbook
+                # (yellow fill FFFFFF99 or light-gray theme:0/tint:-0.15)
+                # Also collect computed cells (theme tint ≈ 0.80).
                 for _row_cells in _ws_v.iter_rows(
                     min_row=1,
                     max_row=_ws_v.max_row,
@@ -483,12 +532,10 @@ class JsonExcelProcessor(ExcelProcessor):
                     max_col=_ws_v.max_column,
                 ):
                     for _c in _row_cells:
-                        if (
-                            _c.fill
-                            and _c.fill.start_color
-                            and _c.fill.start_color.index == "FFFFFF99"
-                        ):
+                        if _is_input_cell_fill(_c):
                             _yellow_cell_set.add((_sn, _c.row, _c.column))
+                        elif _is_computed_cell_fill(_c):
+                            _computed_cell_set.add((_sn, _c.row, _c.column))
                 # Build (sheet, row) → leftmost template_label key from formulas
                 # and (sheet, row, col) → template_label key for column-aware resolution
                 for _row_cells in _ws_f.iter_rows(
@@ -950,6 +997,52 @@ class JsonExcelProcessor(ExcelProcessor):
                                 "warnings": [warning_entry],
                             }
 
+            # --- Section header labels from formulas -------------------------
+            # Each section ``template_*`` defined name points to a header
+            # cell whose formula concatenates the section label with date
+            # range and applicability strings, e.g.:
+            #   =template_label_b2_cooperative_specific_disclosures & " "
+            #     & template_label_from & …
+            # We extract the *first* ``template_label_*`` identifier from
+            # that formula and look it up in the already-resolved ``labels``
+            # dict to get the clean, human-readable header for each section.
+            _section_label_re = re.compile(r"template_label_(\w+)")
+            _non_section = {
+                "template_currency",
+                "template_selected_display_language",
+                "template_overall_validation_status",
+                "template_starting_date_display",
+                "template_translations",
+            }
+            for _dn in wb_formulas.defined_names.values():
+                if not _dn.name or not _dn.name.startswith("template_"):
+                    continue
+                if _dn.name.startswith("template_label_") or _dn.name.startswith(
+                    "template_reporting_"
+                ):
+                    continue
+                if _dn.name in _non_section:
+                    continue
+                # Read the raw formula from the first destination cell
+                for _sh, _co in _dn.destinations:
+                    if _sh not in wb_formulas:
+                        continue
+                    try:
+                        _cr = CellRange(_co)
+                    except Exception:
+                        continue
+                    _cell = wb_formulas[_sh].cell(row=_cr.min_row, column=_cr.min_col)
+                    _formula = str(_cell.value or "")
+                    _m = _section_label_re.search(_formula)
+                    if _m:
+                        _lkey = _m.group(1)  # key into ``labels``
+                        _header = labels.get(_lkey)
+                        if _header and isinstance(_header, str):
+                            # Store keyed by the part after ``template_``
+                            _section_key = _dn.name[len("template_") :]
+                            section_labels[_section_key] = _header
+                    break
+
             wb_formulas.close()
 
         # --- Excel-native sections -----------------------------------------
@@ -1056,13 +1149,15 @@ class JsonExcelProcessor(ExcelProcessor):
                             dn.name
                         )
 
-        # --- Yellow-cell helper fields ----------------------------------------
-        # Cells with fill colour FFFFFF99 (yellow) are helper/condition fields
-        # that are not part of the XBRL report but facilitate completion of
-        # the disclosures.  They include boolean trigger questions ("Has the
-        # undertaking…?"), helper numeric inputs, and dropdown selections.
+        # --- Input-cell helper fields ---------------------------------------------
+        # Cells with an input-cell fill colour (yellow FFFFFF99 or light-gray
+        # theme:0/tint:-0.15) are helper/condition fields that are not part
+        # of the XBRL report but facilitate completion of the disclosures.
+        # They include boolean trigger questions ("Has the undertaking…?"),
+        # helper numeric inputs (e.g. board-member counts that feed calculated
+        # XBRL ratios), and dropdown selections.
         #
-        # We scan for yellow cells that carry a user-editable value (boolean,
+        # We scan for input cells that carry a user-editable value (boolean,
         # number, or dropdown), derive a stable identifier from the
         # ``template_label_*`` formula on the same row, and collect their
         # metadata so they can be included in section field lists.
@@ -1089,8 +1184,11 @@ class JsonExcelProcessor(ExcelProcessor):
                 else None
             )
 
-            # First pass: collect all yellow cells on this sheet
+            # First pass: collect all input cells on this sheet
+            # (yellow fill FFFFFF99 or light-gray theme:0/tint:-0.15)
             yellow_on_sheet: dict[int, dict[int, object]] = {}  # row → {col → value}
+            # Also collect computed cells (theme:8/tint≈0.80) on the same sheet
+            computed_on_sheet: dict[int, dict[int, object]] = {}  # row → {col → value}
             for row_cells in ws_val.iter_rows(
                 min_row=1,
                 max_row=ws_val.max_row,
@@ -1098,12 +1196,12 @@ class JsonExcelProcessor(ExcelProcessor):
                 max_col=ws_val.max_column,
             ):
                 for cell in row_cells:
-                    if (
-                        cell.fill
-                        and cell.fill.start_color
-                        and cell.fill.start_color.index == "FFFFFF99"
-                    ):
+                    if _is_input_cell_fill(cell):
                         yellow_on_sheet.setdefault(cell.row, {})[
+                            cell.column
+                        ] = cell.value
+                    elif _is_computed_cell_fill(cell):
+                        computed_on_sheet.setdefault(cell.row, {})[
                             cell.column
                         ] = cell.value
 
@@ -1142,23 +1240,26 @@ class JsonExcelProcessor(ExcelProcessor):
 
                 if not label_key and ws_form is not None:
                     # No label found on the same row.  Look upward in the same
-                    # column (within 3 rows) for a yellow label cell — this
-                    # covers multi-row question layouts (e.g. GI row 554 label
-                    # / row 556 answer grid, or GI row 447 label / 449 answer).
+                    # column (within 3 rows) for an input-fill label cell —
+                    # this covers multi-row question layouts (e.g. GI row 554
+                    # label / row 556 answer grid, or GI row 447 label / 449
+                    # answer).
                     # Use the smallest (leftmost) answer column as the anchor.
                     anchor_col = min(col_vals.keys())
                     for look_back in range(1, 4):
                         candidate_row = row_num - look_back
                         if candidate_row < 1:
                             break
-                        cand_cell = ws_form.cell(row=candidate_row, column=anchor_col)
-                        if (
-                            cand_cell.fill
-                            and cand_cell.fill.start_color
-                            and cand_cell.fill.start_color.index == "FFFFFF99"
-                            and isinstance(cand_cell.value, str)
+                        cand_cell_form = ws_form.cell(
+                            row=candidate_row, column=anchor_col
+                        )
+                        cand_cell_val = ws_val.cell(
+                            row=candidate_row, column=anchor_col
+                        )
+                        if _is_input_cell_fill(cand_cell_val) and isinstance(
+                            cand_cell_form.value, str
                         ):
-                            m = _LABEL_RE.match(cand_cell.value.strip())
+                            m = _LABEL_RE.match(cand_cell_form.value.strip())
                             if m:
                                 full_name = m.group(1)
                                 label_key = full_name[len("template_label_") :]
@@ -1282,6 +1383,84 @@ class JsonExcelProcessor(ExcelProcessor):
                     _yellow_fields[field_id] = descriptor
                     _yellow_cell_positions[(sheet_name, row_num, c)] = field_id
 
+                # --- Computed cells on the same row as a yellow label --------
+                # Some rows have a yellow label cell (C) with a computed value
+                # cell (D) — e.g. "Total hours worked" in b9 row 142.
+                # These need a field entry marked isComputed=True.
+                # Only pick up computed cells whose column is adjacent to the
+                # yellow cell column range on this row — this avoids false
+                # positives from side-by-side sections (e.g. b3/c3 share rows).
+                if label_key and row_num in computed_on_sheet:
+                    _min_yc = min(col_vals.keys())
+                    _max_yc = max(col_vals.keys())
+                    for c, val in sorted(computed_on_sheet[row_num].items()):
+                        # Must be within ±1 of the yellow cell column range
+                        if c < _min_yc - 1 or c > _max_yc + 1:
+                            continue
+                        # Skip label cells
+                        if ws_form is not None:
+                            form_val = ws_form.cell(row=row_num, column=c).value
+                            if isinstance(form_val, str) and _LABEL_RE.match(
+                                form_val.strip()
+                            ):
+                                continue
+                        # Skip cells already covered by XBRL defined names
+                        if (sheet_name, row_num, c) in _xbrl_occupied:
+                            continue
+                        # Skip dashes (empty computed cells)
+                        if val is None:
+                            continue
+                        if isinstance(val, (str, CellRichText)) and (
+                            str(val) == "-" or str(val) == "\u2013"
+                        ):
+                            continue
+
+                        # Determine input type from value
+                        comp_input_type = "number"
+                        comp_data_type = "decimalItemType"
+                        if isinstance(val, bool):
+                            comp_input_type = "boolean"
+                            comp_data_type = "booleanItemType"
+                        elif isinstance(val, (str, CellRichText)):
+                            comp_input_type = "text"
+                            comp_data_type = None
+
+                        col_letter = get_column_letter(c)
+                        comp_field_id = f"yellow_{label_key}_{col_letter}{row_num}"
+
+                        # Skip if we already created a yellow field for this cell
+                        if comp_field_id in _yellow_fields:
+                            continue
+
+                        # i18n labels
+                        comp_labels: dict[str, str] = {}
+                        if label_key in translations:
+                            comp_labels = dict(translations[label_key])
+                        elif label_text:
+                            comp_labels["en"] = label_text
+
+                        comp_descriptor: dict = {
+                            "fieldId": comp_field_id,
+                            "source": "yellowCell",
+                            "labelKey": label_key,
+                            "templateLabelKey": template_label_full,
+                            "label": label_text or label_key,
+                            "labels": comp_labels,
+                            "inputType": comp_input_type,
+                            "dataType": comp_data_type,
+                            "value": fact_value_to_json(val),
+                            "cellRef": f"{sheet_name}!{col_letter}{row_num}",
+                            "sheet": sheet_name,
+                            "row": row_num,
+                            "col": c,
+                            "isRequired": False,
+                            "isReportable": False,
+                            "isComputed": True,
+                        }
+
+                        _yellow_fields[comp_field_id] = comp_descriptor
+                        _yellow_cell_positions[(sheet_name, row_num, c)] = comp_field_id
+
         # --- Row → template_label mapping ------------------------------------
         # For every data-sheet row that contains a ``=template_label_*``
         # formula we record the *leftmost* label key.  This lets us attach
@@ -1355,9 +1534,9 @@ class JsonExcelProcessor(ExcelProcessor):
                                 col_span,
                             )
                         elif full_name == "template_label_additional_rows_warning":
-                            _additional_rows_warnings[
-                                (sheet_name, cell.row)
-                            ] = cell.column
+                            _additional_rows_warnings[(sheet_name, cell.row)] = (
+                                cell.column
+                            )
                             # Warning cells must NOT populate
                             # _row_to_template_label — otherwise
                             # range-based XBRL names spanning the
@@ -1490,9 +1669,7 @@ class JsonExcelProcessor(ExcelProcessor):
                 # Build validation info
                 vr = validation_rules.get(fn)
                 # Cell reference for traceability
-                cell_ref = (
-                    f"{hdr['sheet']}!{get_column_letter(u_col)}{u_row}"
-                )
+                cell_ref = f"{hdr['sheet']}!{get_column_letter(u_col)}{u_row}"
                 unit_fields_in_section[fn] = {
                     "fieldId": fn,
                     "value": cell_val,
@@ -1519,12 +1696,19 @@ class JsonExcelProcessor(ExcelProcessor):
             # Section-title cells (on the exact header row, same column as the
             # defined-name anchor, usually also bold) are excluded because they
             # are section titles, not data-column headers.
+            #
+            # **Exception — computed-row labels:** Bold labels on rows that
+            # contain a computed cell (theme tint ≈ 0.80) are treated as
+            # row labels, not column headers.  These are auto-calculated
+            # summary fields (e.g. accident rate, turnover rate, gender
+            # ratio) whose label the template bolds for emphasis, but the
+            # cell is not a table column header.
 
-            # Collect all template_label cells within this section's bounds,
-            # together with their bold status.
             # Collect all template_label cells within this section's bounds,
             # together with their bold status and merge column span.
             section_label_cells: list[tuple[int, int, str, bool, int]] = []
+            # Identify rows with computed cells within this section
+            _computed_rows_in_section: set[int] = set()
             for (_sh, _r, _c), (lbl_name, is_bold, col_span) in _label_cell_map.items():
                 if _sh != hdr["sheet"]:
                     continue
@@ -1533,6 +1717,9 @@ class JsonExcelProcessor(ExcelProcessor):
                 if not (col_min <= _c <= col_max):
                     continue
                 section_label_cells.append((_r, _c, lbl_name, is_bold, col_span))
+            for _cr_sh, _cr_r, _cr_c in _computed_cell_set:
+                if _cr_sh == hdr["sheet"] and hdr["row"] <= _cr_r <= end_row:
+                    _computed_rows_in_section.add(_cr_r)
             section_label_cells.sort(key=lambda t: (t[0], t[1]))
 
             # Identify the section-title cell(s) to exclude from label
@@ -1543,7 +1730,8 @@ class JsonExcelProcessor(ExcelProcessor):
             title_positions: set[tuple[int, int]] = set()
             title_positions.add((hdr["row"], hdr["col"]))
 
-            # Row labels: NON-bold template_label cells (excluding titles)
+            # Row labels: NON-bold template_label cells (excluding titles),
+            # plus bold labels on computed rows (auto-calculated fields).
             section_row_labels: dict[int, str] = {}  # row → template_label_name
             # Map each row label to its column so we can later identify
             # index columns (columns that contain row labels).
@@ -1551,7 +1739,9 @@ class JsonExcelProcessor(ExcelProcessor):
             for _r, _c, lbl_name, is_bold, _cs in section_label_cells:
                 if (_r, _c) in title_positions:
                     continue
-                if not is_bold:
+                # Bold labels on computed rows are treated as row labels
+                effective_bold = is_bold and _r not in _computed_rows_in_section
+                if not effective_bold:
                     if _r not in section_row_labels:
                         section_row_labels[_r] = lbl_name
                         _row_label_col_map[_r] = _c
@@ -1573,7 +1763,8 @@ class JsonExcelProcessor(ExcelProcessor):
             for _r, _c, _lbl, _ib, _cs in section_label_cells:
                 if (_r, _c) in title_positions:
                     continue
-                if _ib:
+                # Bold on computed rows doesn't count as a column header
+                if _ib and _r not in _computed_rows_in_section:
                     _bold_per_row[_r] += 1
 
             section_col_labels: dict[int, str] = {}  # col → template_label_name
@@ -1584,7 +1775,10 @@ class JsonExcelProcessor(ExcelProcessor):
             for _r, _c, lbl_name, is_bold, _cs in section_label_cells:
                 if (_r, _c) in title_positions:
                     continue
-                if is_bold:
+                # Skip bold labels on computed rows — already classified as
+                # row labels above.
+                effective_bold = is_bold and _r not in _computed_rows_in_section
+                if effective_bold:
                     # A single-bold row whose cell is wide-merged is a
                     # section-wide header, not a column label.
                     if _bold_per_row[_r] < 2 and _cs >= _WIDE_MERGE_THRESHOLD:
@@ -1662,6 +1856,13 @@ class JsonExcelProcessor(ExcelProcessor):
                     if _arw_row is None or _arw_r < _arw_row:
                         _arw_row = _arw_r
 
+            # Collect computed cell positions within this section for
+            # marking fields as auto-calculated.
+            _computed_in_section: set[tuple[int, int]] = set()
+            for _cr_sh, _cr_r, _cr_c in _computed_cell_set:
+                if _cr_sh == hdr["sheet"] and hdr["row"] <= _cr_r <= end_row:
+                    _computed_in_section.add((_cr_r, _cr_c))
+
             excel_sections.append(
                 {
                     "sectionId": section_id,
@@ -1683,6 +1884,7 @@ class JsonExcelProcessor(ExcelProcessor):
                     "colLabelRow": col_label_row,
                     "sectionWideLabels": section_wide_labels,
                     "additionalRowsWarningRow": _arw_row,
+                    "computedPositions": _computed_in_section,
                 }
             )
 
@@ -1727,6 +1929,7 @@ class JsonExcelProcessor(ExcelProcessor):
             "translations": translations,
             "metadata": metadata,
             "sectionApplicability": section_applicability,
+            "sectionLabels": section_labels,
             "excelSections": excel_sections,
             "omittedDisclosures": omitted_disclosures,
             "enumLists": enum_lists,
@@ -1997,6 +2200,7 @@ def extract_facts_by_section(
         col_label_row: int | None = es.get("colLabelRow")
         section_wide_labels = es.get("sectionWideLabels", {})
         additional_rows_warning_row: int | None = es.get("additionalRowsWarningRow")
+        computed_positions: set[tuple[int, int]] = es.get("computedPositions", set())
 
         # --- Expected fields from taxonomy -----------------------------------
         expected_by_local: dict[str, dict] = {}
@@ -2234,9 +2438,7 @@ def extract_facts_by_section(
                             ):
                                 pass  # do not inherit — leave rl_name as None
                             else:
-                                rl_name = section_row_labels.get(
-                                    candidate_row
-                                )
+                                rl_name = section_row_labels.get(candidate_row)
                     if rl_name:
                         rl_key = rl_name[len("template_label_") :]
                         rl_tl = {}
@@ -2309,6 +2511,8 @@ def extract_facts_by_section(
                     }
                     if yf.get("options"):
                         entry["options"] = yf["options"]
+                    if yf.get("isComputed"):
+                        entry["isComputed"] = True
                     if yf.get("value") is not None:
                         has_facts = True
                     entry.update(_matrix_labels(field_name, is_yellow_cell=True))
@@ -2333,9 +2537,7 @@ def extract_facts_by_section(
                                 prev.get("source") == "unitSelection"
                                 and prev.get("cellRef") == cell_ref
                             ):
-                                prev.setdefault(
-                                    "unitFieldIds", [prev["fieldId"]]
-                                )
+                                prev.setdefault("unitFieldIds", [prev["fieldId"]])
                                 if uf["fieldId"] not in prev["unitFieldIds"]:
                                     prev["unitFieldIds"].append(uf["fieldId"])
                                 break
@@ -2357,7 +2559,7 @@ def extract_facts_by_section(
                             idx = _bisect.bisect_right(sw_rows, f_row)
                             if idx > 0:
                                 sw_name = section_wide_labels[sw_rows[idx - 1]]
-                                lk = sw_name[len("template_label_"):]
+                                lk = sw_name[len("template_label_") :]
                                 if translations and lk in translations:
                                     tl = dict(translations[lk])
                     # Last fallback: column label at the field's column
@@ -2367,16 +2569,14 @@ def extract_facts_by_section(
                             f_col = pos[1]
                             cl_name = section_col_labels.get(f_col)
                             if cl_name:
-                                lk = cl_name[len("template_label_"):]
+                                lk = cl_name[len("template_label_") :]
                                 if translations and lk in translations:
                                     tl = dict(translations[lk])
                     entry = {
                         "fieldId": uf["fieldId"],
                         "source": "unitSelection",
                         "labelKey": lk,
-                        "templateLabelKey": (
-                            f"template_label_{lk}" if lk else None
-                        ),
+                        "templateLabelKey": (f"template_label_{lk}" if lk else None),
                         "label": tl.get("en", uf["fieldId"]),
                         "labels": tl,
                         "templateLabels": tl,
@@ -2417,11 +2617,21 @@ def extract_facts_by_section(
                     # No reported value — emit schema with value: null
                     entry = dict(schema)
                     entry["value"] = None
-                    entry.update(_matrix_labels(field_name))
+                    ml = _matrix_labels(field_name)
+                    # Mark computed fields (value cell has auto-calc fill)
+                    pos = field_positions.get(field_name)
+                    if pos and (pos[0], pos[1]) in computed_positions:
+                        entry["isComputed"] = True
+                    entry.update(ml)
                     fields.append(entry)
                 else:
                     # One or more reported facts for this field
                     ml = _matrix_labels(field_name)
+                    # Check if the field's value cell is auto-calculated
+                    pos = field_positions.get(field_name)
+                    _field_is_computed = bool(
+                        pos and (pos[0], pos[1]) in computed_positions
+                    )
                     for fact in fact_list:
                         has_facts = True
                         entry = dict(schema)
@@ -2446,6 +2656,8 @@ def extract_facts_by_section(
                                 for dk, dv in fact.getTaxonomyDimensions().items()
                             }
                         entry.update(ml)
+                        if _field_is_computed:
+                            entry["isComputed"] = True
                         fields.append(entry)
 
             # Append any extra facts not covered by expectedFields (e.g.
@@ -2610,6 +2822,7 @@ def main() -> None:
             "factCount": report.factCount,
             "templateMetadata": template_data["metadata"],
             "templateLabels": template_data["labels"],
+            "sectionLabels": template_data["sectionLabels"],
             "translations": template_data["translations"],
             "sectionApplicability": template_data["sectionApplicability"],
             "omittedDisclosures": template_data["omittedDisclosures"],

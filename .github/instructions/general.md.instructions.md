@@ -40,6 +40,8 @@ The script `scripts/gen-survey-json.py` takes care of converting the `output/rep
 - Section headers have can be identified from defined names starting with `template_` 
 (excluding those starting with `template_label`). Section headers also always have a fill color.
 - Cells that contain values starting with `=template_label` used in the excel can be thought of as questions labels for a user answer given in a related cell. The associated answer cells are located to the right or below the question label cells. 
+- Each section contains a sheet name. The script `scripts/gen-survey-json.py` should create a survey_group_name field in the output JSON structure for each section, with the value of the sheet name of the section. This field can be used to group sections by sheet in the survey tool.
+- The output JSON structure should also include `sort_index` field which indicates the order of the sections and which order the survery should be accessed in the online survey tool.  
 
 #### Section data
 Section data can be structured within a section in several different ways. A single section may further contain mored than one type of data structure. Below are some examples of how the data can be structured:
@@ -51,5 +53,8 @@ Section data can be structured within a section in several different ways. A sin
 - Section `template_c3_GHG_reduction_targets_in_tC02e` is a special case. It contains two tables of a table with multiple index labels (column C) and a shared column header (`template_label_current_reporting_period`). The first table follows directly below the header and ends with row 26. Cell C29 contains a question label with a boolean answer in Cell G29.
  The second table starts on row 30.  This section does however not contain the row labels in the leftmost column of the same section but intead uses the same row labels as used by section `template_b3_estimated_greenhouse_gas_emissions_considering_the_GHG_protocol_version_2004_in_tCO2e` (these sections are placed side-by-side in the excel). I also include a question - boolean answer pair on row 19 
 
-
+# Notes on cell colors
+- Section headers have a fill color (openpyxl: cell.fill.start_color) that can be used to identify them. The section header color is not the same across all sections but varies between sections.
+- Cells with `cell.fill.start_color.rgb = "FFFFFF99"` (yellow) fill color are helper/condition fields that are not part of the XBRL report but facilitate completion of the disclosures. They include boolean trigger questions ("Has the undertaking…?"), helper numeric inputs, and dropdown selections. These cells can be identified by their fill color and the presence of a user-editable value (boolean, number, or dropdown). They also have a `template_label_*` formula on the same row that can be used to derive a stable identifier for them. These cells should be included in section field lists in the output JSON structure.
+- Cells with `cell.fill.start_color.tint = 0.7999816888943144`: Indicates that the cell is automatically calculated and that no data entry is required. When converted to survey JSON, these cells should be marked with answer_type "COMPUTED" and not require user input.
 

@@ -96,6 +96,7 @@ class TestTopLevelStructure:
         "validationRules",
         "warningDefinitions",
         "definedNames",
+        "sectionLabels",
     }
 
     def test_top_level_keys_present(self, report):
@@ -247,15 +248,15 @@ class TestSectionFieldCounts:
         """B3 Total Energy section has exactly 1 input field (TotalEnergyConsumption)."""
         assert len(sections_by_id["b3_total_energy_consumption_in_MWh"]["fields"]) == 1
 
-    def test_b3_ghg_has_5_fields(self, sections_by_id):
-        """B3 GHG emissions section has 5 fields (scope 1/2 + totals, current period only)."""
+    def test_b3_ghg_has_7_fields(self, sections_by_id):
+        """B3 GHG emissions section has 7 fields (5 XBRL + 2 theme-fill Scope 3 inputs at D30, D38)."""
         assert (
             len(
                 sections_by_id[
                     "b3_estimated_greenhouse_gas_emissions_considering_the_GHG_protocol_version_2004_in_tCO2e"
                 ]["fields"]
             )
-            == 5
+            == 7
         )
 
     def test_b7_waste_has_34_fields(self, sections_by_id):
@@ -376,14 +377,14 @@ class TestFieldProperties:
         assert without_en == [], f"Fields missing English label: {without_en}"
 
     def test_total_fields_count(self, sections):
-        """Total field entries across all sections is 211 (171 XBRL + 27 yellow cell + 13 unit selection)."""
-        assert sum(len(s["fields"]) for s in sections) == 211
+        """Total field entries across all sections is 222 (171 XBRL + 35 input cell + 13 unit selection + 3 computed yellow cell)."""
+        assert sum(len(s["fields"]) for s in sections) == 222
 
     def test_fields_with_value_count(self, sections):
-        """179 field entries have a non-null value in the sample file (139 XBRL + 27 yellow cell + 13 unit selection)."""
+        """190 field entries have a non-null value in the sample file (139 XBRL + 35 input cell + 13 unit selection + 3 computed yellow cell)."""
         assert (
             sum(1 for s in sections for f in s["fields"] if f.get("value") is not None)
-            == 179
+            == 190
         )
 
     def test_fields_ordered_by_row(self, sections_by_id):
@@ -400,6 +401,7 @@ class TestFieldProperties:
         combos = [
             (f["qname"], json.dumps(f.get("dimensions", {}), sort_keys=True))
             for f in s["fields"]
+            if "qname" in f
         ]
         assert len(combos) == len(
             set(combos)
@@ -435,12 +437,12 @@ class TestYellowCellFields:
         ]
 
     def test_total_yellow_field_count(self, yellow_fields):
-        """27 yellow cell fields extracted from the template."""
-        assert len(yellow_fields) == 27
+        """38 input cell fields extracted from the template (27 yellow + 8 theme-fill + 3 computed yellow cell)."""
+        assert len(yellow_fields) == 38
 
     def test_sections_with_yellow_fields(self, yellow_sections):
-        """19 sections contain at least one yellow cell field."""
-        assert len(yellow_sections) == 19
+        """20 sections contain at least one input cell field."""
+        assert len(yellow_sections) == 20
 
     def test_yellow_fields_have_fieldId(self, yellow_fields):
         """Every yellow field uses 'fieldId' (not 'qname') as its identifier."""
@@ -562,15 +564,23 @@ class TestYellowCellFields:
         assert all(f["inputType"] == "boolean" for f in yf)
 
     def test_b9_hours_worked_is_number(self, sections_by_id):
-        """B9 Health & Safety has a yellow 'hours worked' number field = 2000."""
+        """B9 Health & Safety has 2 yellow number fields: D141 (input, 2000) and D142 (computed, 302000)."""
         s = sections_by_id["b9_workforce_health_and_safety"]
         yf = [
             f
             for f in s["fields"]
             if f.get("source") == "yellowCell" and f.get("inputType") == "number"
         ]
-        assert len(yf) == 1
-        assert yf[0]["value"] == 2000
+        assert len(yf) == 2
+        # D141 is the user-input field
+        d141 = [f for f in yf if "D141" in f.get("cellRef", "")]
+        assert len(d141) == 1
+        assert d141[0]["value"] == 2000
+        # D142 is the computed field
+        d142 = [f for f in yf if "D142" in f.get("cellRef", "")]
+        assert len(d142) == 1
+        assert d142[0]["value"] == 302000
+        assert d142[0].get("isComputed") is True
 
     def test_b1_list_of_sites_has_yellow_boolean(self, sections_by_id):
         """B1 List of Sites has a yellow boolean field at GI!H449 (value=True in sample).
@@ -613,8 +623,8 @@ class TestYellowCellFields:
             len(xbrl_fields) == 171
         ), f"Expected 171 XBRL fields, got {len(xbrl_fields)}"
         assert (
-            len(yellow_fields) == 27
-        ), f"Expected 27 yellow fields, got {len(yellow_fields)}"
+            len(yellow_fields) == 38
+        ), f"Expected 38 input cell fields, got {len(yellow_fields)}"
         # No overlap: yellow fields should not have 'qname'
         overlap = [f for f in yellow_fields if "qname" in f]
         assert (
@@ -656,7 +666,10 @@ class TestUnitSelectionFields:
     @pytest.fixture(scope="class")
     def unit_fields(self, sections):
         return [
-            f for s in sections for f in s["fields"] if f.get("source") == "unitSelection"
+            f
+            for s in sections
+            for f in s["fields"]
+            if f.get("source") == "unitSelection"
         ]
 
     @pytest.fixture(scope="class")
@@ -699,7 +712,9 @@ class TestUnitSelectionFields:
         may not have a direct xbrlToEnum mapping and thus lack options.
         After consolidation, at least 6 of 13 unit fields have options.
         """
-        with_options = [f for f in unit_fields if "options" in f and len(f["options"]) >= 2]
+        with_options = [
+            f for f in unit_fields if "options" in f and len(f["options"]) >= 2
+        ]
         assert (
             len(with_options) >= 6
         ), f"Expected ≥6 unit fields with options, got {len(with_options)}"
@@ -759,7 +774,9 @@ class TestUnitSelectionFields:
         assert "AmountOfEmissionToWater_unit" in underlying
         assert "AmountOfEmissionToSoil_unit" in underlying
 
-    def test_b5_biodiversity_land_use_has_1_consolidated_unit_field(self, sections_by_id):
+    def test_b5_biodiversity_land_use_has_1_consolidated_unit_field(
+        self, sections_by_id
+    ):
         """B5 biodiversity land use section has 1 consolidated unit field.
 
         All four _unit fields reference the same Excel cell (C293) so they
@@ -769,7 +786,10 @@ class TestUnitSelectionFields:
         s = sections_by_id["b5_biodiversity_land_use"]
         uf = [f for f in s["fields"] if f.get("source") == "unitSelection"]
         assert len(uf) == 1
-        assert uf[0]["templateLabelKey"] == "template_label_please_select_the_unit_used_for_the_area"
+        assert (
+            uf[0]["templateLabelKey"]
+            == "template_label_please_select_the_unit_used_for_the_area"
+        )
         assert "unitFieldIds" in uf[0]
         underlying = set(uf[0]["unitFieldIds"])
         assert "TotalSealedArea_unit" in underlying
@@ -1332,18 +1352,19 @@ class TestMatrixLabels:
         assert len(col_only) == 2
 
     def test_index_label_section_count(self, report):
-        """16 sections should have indexLabels.
+        """12 sections should have indexLabels.
 
         Index labels are bold column headers whose column also contains
         non-bold row labels — they describe the row-label dimension
         (e.g. "Land-use type", "Row ID", "Gender").
+
+        Previously 16 sections had indexLabels, but 4 sections had bold
+        labels on computed rows that were misclassified as column headers.
+        With the computed-cell fix those labels are now correctly treated
+        as row labels, reducing the index-label count to 12.
         """
-        has_idx = [
-            s
-            for s in report["sections"]
-            if s.get("indexLabels")
-        ]
-        assert len(has_idx) == 16
+        has_idx = [s for s in report["sections"] if s.get("indexLabels")]
+        assert len(has_idx) == 12
 
     def test_b5_land_use_has_index_label(self, report):
         """b5_biodiversity_land_use should have land_use_type as indexLabel."""
@@ -1607,7 +1628,9 @@ class TestMatrixLabels:
         """B8 type of contract should be a matrix with row labels, column labels and index labels.
 
         type_of_contract (col C) is an index label because col C also
-        contains the row labels (permanent_contract, temporary_contract).
+        contains the row labels (permanent_contract, temporary_contract,
+        total_employees).  total_employees (row 12) is a computed row
+        whose bold label is now correctly treated as a row label.
         """
         sec = _find_section(
             report, "b8_workforce_general_characteristics_type_of_contract"
@@ -1618,35 +1641,42 @@ class TestMatrixLabels:
         assert rl is not None
         assert cl is not None
         assert idx is not None
-        assert len(rl) == 2
+        assert len(rl) == 3
         assert len(cl) == 1
         assert len(idx) == 1
         row_keys = {v["key"] for v in rl.values()}
         assert "permanent_contract" in row_keys
         assert "temporary_contract" in row_keys
+        assert "total_employees" in row_keys
         col_keys = {v["key"] for v in cl.values()}
         assert "number_of_employees" in col_keys
         idx_keys = {v["key"] for v in idx.values()}
         assert "type_of_contract" in idx_keys
 
     def test_b7_waste_has_bold_column_headers(self, report):
-        """B7 waste section should have 5 column headers.
+        """B7 waste section should have 4 column headers and 2 index labels.
 
-        unit_of_measurement (col G) was reclassified as an indexLabel
-        because col G also contains non-bold row labels (unit values).
+        type_of_waste (col D) was reclassified as an indexLabel because
+        the total/summary rows (423-428) have bold labels on computed
+        rows — those labels are now treated as row labels (not column
+        headers), making col D mixed (bold header + non-bold entries).
+
+        row_id (col C) is also an indexLabel for the same reason.
+        unit_of_measurement (col G) remains a column header.
         """
         sec = _find_section(report, "b7_waste_generated")
         cl = sec.get("columnLabels")
         assert cl is not None
-        assert len(cl) == 5
+        assert len(cl) == 4
         col_keys = {v["key"] for v in cl.values()}
-        assert "type_of_waste" in col_keys
+        assert "unit_of_measurement" in col_keys
         assert "waste_diverted_to_recycle_or_reuse" in col_keys
-        # unit_of_measurement is now an index label
+        # type_of_waste and row_id are now index labels
         idx = sec.get("indexLabels")
         assert idx is not None
         idx_keys = {v["key"] for v in idx.values()}
-        assert "unit_of_measurement" in idx_keys
+        assert "type_of_waste" in idx_keys
+        assert "row_id" in idx_keys
 
     # -- additional_rows_warning boundary tests ----------------------------
     # Sections that contain ``=template_label_additional_rows_warning`` cells
@@ -1678,13 +1708,9 @@ class TestMatrixLabels:
             sid = sec["sectionId"]
             arw = sec.get("hasAdditionalRowsWarning", False)
             if sid in self._SECTIONS_WITH_ARW:
-                assert arw is True, (
-                    f"{sid} should have hasAdditionalRowsWarning=True"
-                )
+                assert arw is True, f"{sid} should have hasAdditionalRowsWarning=True"
             else:
-                assert arw is False, (
-                    f"{sid} should have hasAdditionalRowsWarning=False"
-                )
+                assert arw is False, f"{sid} should have hasAdditionalRowsWarning=False"
 
     def test_no_field_has_additional_rows_warning_labelKey(self, report):
         """No field in any section should have labelKey='additional_rows_warning'.
@@ -1701,20 +1727,16 @@ class TestMatrixLabels:
         """Range-based table fields in b7_mass_flow (NameOfMaterialUsed,
         WeightOfMaterialUsed, VolumeOfMaterialUsed) should have
         labelKey=None — not 'additional_rows_warning'."""
-        sec = _find_section(
-            report, "b7_annual_mass_flow_of_relevant_materials_used"
-        )
+        sec = _find_section(report, "b7_annual_mass_flow_of_relevant_materials_used")
         table_qnames = {
             "vsme:NameOfMaterialUsed",
             "vsme:WeightOfMaterialUsed",
             "vsme:VolumeOfMaterialUsed",
         }
-        table_fields = [
-            f for f in sec["fields"] if f.get("qname") in table_qnames
-        ]
-        assert len(table_fields) >= 3, (
-            f"Expected ≥3 table data fields, got {len(table_fields)}"
-        )
+        table_fields = [f for f in sec["fields"] if f.get("qname") in table_qnames]
+        assert (
+            len(table_fields) >= 3
+        ), f"Expected ≥3 table data fields, got {len(table_fields)}"
         for f in table_fields:
             assert f.get("labelKey") is None, (
                 f"Table field {f['qname']} should have labelKey=None "
@@ -1724,18 +1746,16 @@ class TestMatrixLabels:
     def test_b7_mass_flow_total_fields_have_no_column_label(self, report):
         """TotalMass/Volume fields in b7_mass_flow are below the warning row
         and should NOT have a column label (they used to inherit mass_volume)."""
-        sec = _find_section(
-            report, "b7_annual_mass_flow_of_relevant_materials_used"
-        )
+        sec = _find_section(report, "b7_annual_mass_flow_of_relevant_materials_used")
         total_fields = [
             f
             for f in sec["fields"]
             if f.get("rowLabel")
             and "total_annual_mass_flow" in f["rowLabel"].get("key", "")
         ]
-        assert len(total_fields) == 2, (
-            f"Expected 2 total mass/volume fields, got {len(total_fields)}"
-        )
+        assert (
+            len(total_fields) == 2
+        ), f"Expected 2 total mass/volume fields, got {len(total_fields)}"
         for f in total_fields:
             assert f.get("columnLabel") is None, (
                 f"Total field {f.get('rowLabel', {}).get('key', '?')} "
@@ -1745,16 +1765,12 @@ class TestMatrixLabels:
     def test_b7_mass_flow_table_fields_retain_column_labels(self, report):
         """Fields in the table area (above the warning row) should still have
         column labels."""
-        sec = _find_section(
-            report, "b7_annual_mass_flow_of_relevant_materials_used"
-        )
-        fields_with_cl = [
-            f for f in sec["fields"] if f.get("columnLabel") is not None
-        ]
+        sec = _find_section(report, "b7_annual_mass_flow_of_relevant_materials_used")
+        fields_with_cl = [f for f in sec["fields"] if f.get("columnLabel") is not None]
         # Table data fields above the warning should have column labels
-        assert len(fields_with_cl) >= 2, (
-            "Expected at least 2 table fields with column labels in b7_mass_flow"
-        )
+        assert (
+            len(fields_with_cl) >= 2
+        ), "Expected at least 2 table fields with column labels in b7_mass_flow"
         cl_keys = {f["columnLabel"]["key"] for f in fields_with_cl}
         assert "name_of_the_key_material" in cl_keys
         assert "mass_volume" in cl_keys
@@ -1882,6 +1898,17 @@ class TestMatrixLabels:
             "template_label_number_of_employees_at_the_beginning_of_the_reporting_period",
             "template_label_number_of_employees_at_the_end_of_the_reporting_period",
         },
+        # B8 matrix sections: "total_employees" is a computed summary row
+        # (linked from B1) with no separate XBRL field.
+        "b8_workforce_general_characteristics_type_of_contract": {
+            "template_label_total_employees",
+        },
+        "b8_workforce_general_characteristics_gender": {
+            "template_label_total_employees",
+        },
+        "b8_workforce_general_characteristics_country_of_employment": {
+            "template_label_total_employees",
+        },
         # Pay gap: intermediate input rows for male/female hourly pay feed
         # the computed percentage gap field.
         "b10_workforce_remuneration_collective_bargaining_and_training": {
@@ -1897,11 +1924,6 @@ class TestMatrixLabels:
         "c5_additional_general_workforce_characteristics": {
             "template_label_number_of_male_employees_at_management_level",
             "template_label_number_of_female_employees_at_management_level",
-        },
-        # Health & safety: intermediate input row (total hours worked) feeds
-        # the computed accident rate field.
-        "b9_workforce_health_and_safety": {
-            "template_label_total_number_of_hours_worked_in_a_year_by_all_employees_in_the_reporting_period",
         },
         # Human rights policies: sub-option labels (forced_labour, etc.)
         # under "if_yes_does_this_cover" conditional block — individual
@@ -2000,10 +2022,11 @@ class TestMatrixLabels:
         "b5_sites_in_biodiversity_sensitive_areas": {
             "template_label_site_location_in_near_a_biodiversity_area",
         },
-        # B7 waste: col C (row_id) and col D (type_of_waste) are user-input columns
+        # B7 waste: col G (unit_of_measurement) is a user-input column,
+        # col C (row_id) and col D (type_of_waste) are now indexLabels
+        # after the computed-cell reclassification.
         "b7_waste_generated": {
-            "template_label_row_id",
-            "template_label_type_of_waste",
+            "template_label_unit_of_measurement",
         },
         # B7 mass flow: col J (unit_of_measurement) is a user-input column
         "b7_annual_mass_flow_of_relevant_materials_used": {

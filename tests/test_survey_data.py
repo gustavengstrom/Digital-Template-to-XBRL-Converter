@@ -22,6 +22,7 @@ AND note the change in scripts/gen-survey-json.py docstring.
 """
 
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -34,6 +35,7 @@ import pytest
 SURVEYS_DIR = Path(__file__).parent.parent / "output" / "surveys"
 COMBINED_PATH = SURVEYS_DIR / "survey_data_all.json"
 REPORT_PATH = Path(__file__).parent.parent / "output" / "report-facts.json"
+SNAPSHOT_PATH = Path(__file__).parent / "data" / "survey_snapshot.json"
 
 
 @pytest.fixture(scope="session")
@@ -193,9 +195,7 @@ class TestB7MassFlowSurvey:
 
     @pytest.fixture(scope="class")
     def mass_flow(self):
-        return _load_section_survey(
-            "b7_annual_mass_flow_of_relevant_materials_used"
-        )
+        return _load_section_survey("b7_annual_mass_flow_of_relevant_materials_used")
 
     @pytest.fixture(scope="class")
     def questions(self, mass_flow):
@@ -214,13 +214,14 @@ class TestB7MassFlowSurvey:
         assert questions[0]["answer_type"] == "RADIO"
 
     def test_table_data_before_summaries(self, questions):
-        """Table data fields (NameOfMaterialUsed, Weight/Volume) must appear
+        """Table data fields (NameOfMaterialUsed, Mass/Volume) must appear
         before summary/total fields (TotalMass/Volume).  After column-label
-        dedup, only WeightOfMaterialUsed survives (VolumeOfMaterialUsed
-        shares the same column and is collapsed)."""
+        dedup, one of Weight/VolumeOfMaterialUsed survives (they share the
+        same column label and are collapsed)."""
         table_qnames = {
             "vsme:NameOfMaterialUsed",
             "vsme:WeightOfMaterialUsed",
+            "vsme:VolumeOfMaterialUsed",
         }
         summary_qnames = {
             "vsme:TotalMassOfMaterialUsed",
@@ -249,8 +250,7 @@ class TestB7MassFlowSurvey:
         """Display-only unit fields (TotalMass/VolumeOfMaterialUsed_unit)
         should be excluded — they have no options."""
         unit_field_ids = [
-            q.get("_meta", {}).get("source_field_id", "")
-            for q in questions
+            q.get("_meta", {}).get("source_field_id", "") for q in questions
         ]
         assert "TotalMassOfMaterialUsed_unit" not in unit_field_ids
         assert "TotalVolumeOfMaterialUsed_unit" not in unit_field_ids
@@ -258,13 +258,14 @@ class TestB7MassFlowSurvey:
     def test_unit_selection_has_options(self, questions):
         """The shared unit selection field must have answer options."""
         unit_qs = [
-            q for q in questions if q["answer_type"] == "DROPDOWN"
-            and q.get("answer_options")
+            q
+            for q in questions
+            if q["answer_type"] == "DROPDOWN" and q.get("answer_options")
         ]
         assert len(unit_qs) >= 1, "Expected at least 1 DROPDOWN with options"
 
-    def test_summary_totals_are_numeric(self, questions):
-        """TotalMass and TotalVolume fields must be NUMERIC."""
+    def test_summary_totals_are_computed(self, questions):
+        """TotalMass and TotalVolume fields must be COMPUTED (auto-calculated)."""
         summary_qnames = {
             "vsme:TotalMassOfMaterialUsed",
             "vsme:TotalVolumeOfMaterialUsed",
@@ -276,7 +277,7 @@ class TestB7MassFlowSurvey:
         ]
         assert len(summaries) == 2
         for q in summaries:
-            assert q["answer_type"] == "NUMERIC"
+            assert q["answer_type"] == "COMPUTED"
 
     def test_no_duplicate_names(self, questions):
         """No two questions should share the same name."""
@@ -290,12 +291,10 @@ class TestB7MassFlowSurvey:
         """The 'Mass / Volume' column must produce exactly one survey
         question (Weight + Volume share the same column label and the
         unit dropdown determines interpretation)."""
-        mass_vol_qs = [
-            q for q in questions if q["name"] == "Mass / Volume"
-        ]
-        assert len(mass_vol_qs) == 1, (
-            f"Expected 1 'Mass / Volume' question, got {len(mass_vol_qs)}"
-        )
+        mass_vol_qs = [q for q in questions if q["name"] == "Mass / Volume"]
+        assert (
+            len(mass_vol_qs) == 1
+        ), f"Expected 1 'Mass / Volume' question, got {len(mass_vol_qs)}"
 
     def test_dynamic_group_on_table_fields(self, questions):
         """Table fields (name, mass/volume, unit) must be in a dynamic
@@ -369,16 +368,16 @@ class TestB4PollutionSurvey:
     def test_static_questions_first(self, questions):
         """First 4 questions must be static (no __DQ0 suffix)."""
         for i in range(4):
-            assert "__DQ0" not in questions[i]["id"], (
-                f"Question {i} should be static, got id={questions[i]['id']}"
-            )
+            assert (
+                "__DQ0" not in questions[i]["id"]
+            ), f"Question {i} should be static, got id={questions[i]['id']}"
 
     def test_dynamic_questions_last(self, questions):
         """Last 4 questions must be dynamic (__DQ0 suffix)."""
         for i in range(4, 8):
-            assert "__DQ0" in questions[i]["id"], (
-                f"Question {i} should be dynamic, got id={questions[i]['id']}"
-            )
+            assert (
+                "__DQ0" in questions[i]["id"]
+            ), f"Question {i} should be dynamic, got id={questions[i]['id']}"
 
     def test_trigger_is_first(self, questions):
         """The yellow-cell trigger question must be first."""
@@ -395,18 +394,18 @@ class TestB4PollutionSurvey:
                 unit_q = q
                 break
         assert unit_q is not None, "Unit selection question not found"
-        assert "__DQ0" not in unit_q["id"], (
-            "Unit field should be static (section-wide), not dynamic"
-        )
+        assert (
+            "__DQ0" not in unit_q["id"]
+        ), "Unit field should be static (section-wide), not dynamic"
         assert unit_q["answer_type"] == "DROPDOWN"
 
     def test_pollutant_is_dynamic_dropdown(self, questions):
         """The Pollutant field must be a dynamic DROPDOWN with options
         from enum_ListPollutants."""
         pollutant_qs = [q for q in questions if q["name"] == "Pollutant"]
-        assert len(pollutant_qs) == 1, (
-            f"Expected 1 Pollutant question, got {len(pollutant_qs)}"
-        )
+        assert (
+            len(pollutant_qs) == 1
+        ), f"Expected 1 Pollutant question, got {len(pollutant_qs)}"
         pq = pollutant_qs[0]
         assert "__DQ0" in pq["id"]
         assert pq["answer_type"] == "DROPDOWN"
@@ -417,9 +416,9 @@ class TestB4PollutionSurvey:
         """Emission to air/water/soil must be dynamic NUMERIC fields."""
         emission_names = {"Emission to air", "Emission to water", "Emission to soil"}
         emission_qs = [q for q in questions if q["name"] in emission_names]
-        assert len(emission_qs) == 3, (
-            f"Expected 3 emission questions, got {len(emission_qs)}"
-        )
+        assert (
+            len(emission_qs) == 3
+        ), f"Expected 3 emission questions, got {len(emission_qs)}"
         for eq in emission_qs:
             assert "__DQ0" in eq["id"]
             assert eq["answer_type"] == "NUMERIC"
@@ -438,14 +437,12 @@ class TestB4PollutionSurvey:
     def test_dynamic_tag_references_pollutant(self, questions):
         """Tag expression should reference the Pollutant field's DQ0 ID."""
         dynamic_qs = [q for q in questions if "__DQ0" in q["id"]]
-        pollutant_id = next(
-            q["id"] for q in dynamic_qs if q["name"] == "Pollutant"
-        )
+        pollutant_id = next(q["id"] for q in dynamic_qs if q["name"] == "Pollutant")
         for q in dynamic_qs:
             tag = q.get("dynamic_tag_expression", "")
-            assert tag == f"{{{pollutant_id}}}", (
-                f"Expected tag expression '{{{pollutant_id}}}', got '{tag}'"
-            )
+            assert (
+                tag == f"{{{pollutant_id}}}"
+            ), f"Expected tag expression '{{{pollutant_id}}}', got '{tag}'"
 
     def test_no_duplicate_names(self, questions):
         """No two questions should share the same name."""
@@ -497,15 +494,12 @@ class TestB7WasteSurvey:
 
     def test_unit_is_section_wide(self, questions):
         """The unit dropdown must be static (no __DQ0)."""
-        unit_qs = [
-            q for q in questions
-            if "unit selection" in q["name"].lower()
-        ]
+        unit_qs = [q for q in questions if "unit selection" in q["name"].lower()]
         assert len(unit_qs) >= 1
         for uq in unit_qs:
-            assert "__DQ0" not in uq["id"], (
-                "Unit field should be static (section-wide), not dynamic"
-            )
+            assert (
+                "__DQ0" not in uq["id"]
+            ), "Unit field should be static (section-wide), not dynamic"
 
     def test_dynamic_count(self, questions):
         """4 dynamic questions: type_of_waste + 3 waste columns."""
@@ -518,14 +512,10 @@ class TestB7WasteSurvey:
     def test_dynamic_tag_references_waste_type(self, questions):
         """Tag expression should reference the Type of waste field."""
         dynamic_qs = [q for q in questions if "__DQ0" in q["id"]]
-        type_id = next(
-            q["id"] for q in dynamic_qs if q["name"] == "Type of waste"
-        )
+        type_id = next(q["id"] for q in dynamic_qs if q["name"] == "Type of waste")
         for q in dynamic_qs:
             tag = q.get("dynamic_tag_expression", "")
-            assert tag == f"{{{type_id}}}", (
-                f"Expected tag '{{{type_id}}}', got '{tag}'"
-            )
+            assert tag == f"{{{type_id}}}", f"Expected tag '{{{type_id}}}', got '{tag}'"
 
 
 # ---------------------------------------------------------------------------
@@ -542,10 +532,12 @@ class TestB7WasteSurvey:
 _COLUMN_DEDUP_COLLAPSED: dict[str, str] = {
     # b7_annual_mass_flow: Volume collapsed into Weight (same "mass_volume" column)
     "vsme:VolumeOfMaterialUsed": "vsme:WeightOfMaterialUsed",
-    # b7_waste_generated: Mass/Volume alternates within same column
-    "vsme:WasteDivertedToRecycleOrReuseMass": "vsme:WasteDivertedToRecycleOrReuseVolume",
+    # b7_waste_generated: Mass/Volume alternates within same column.
+    # After the computed-cell reclassification the column-dedup survivor
+    # selection may flip depending on which variant appears first.
+    "vsme:WasteDivertedToRecycleOrReuseVolume": "vsme:WasteDivertedToRecycleOrReuseMass",
     "vsme:WasteDirectedToDisposalVolume": "vsme:WasteDirectedToDisposalMass",
-    "vsme:TotalWasteRecycledReusedAndDirectedToDisposalMass": "vsme:TotalWasteRecycledReusedAndDirectedToDisposalVolume",
+    "vsme:TotalWasteRecycledReusedAndDirectedToDisposalVolume": "vsme:TotalWasteRecycledReusedAndDirectedToDisposalMass",
 }
 
 
@@ -638,9 +630,7 @@ class TestXbrlSurveyCoverage:
         from the survey.  If the qname starts appearing, remove it from the
         dict."""
         false_collapsed = [
-            qn
-            for qn in _COLUMN_DEDUP_COLLAPSED
-            if qn in survey_xbrl_qnames
+            qn for qn in _COLUMN_DEDUP_COLLAPSED if qn in survey_xbrl_qnames
         ]
         if false_collapsed:
             detail = "\n".join(f"  {qn}" for qn in false_collapsed)
@@ -661,3 +651,203 @@ class TestXbrlSurveyCoverage:
                 f"{len(extra)} XBRL qname(s) in survey have no corresponding "
                 f"field in report-facts:\n{detail}"
             )
+
+
+# ---------------------------------------------------------------------------
+# TestSurveySnapshot — regression guard for already-correct sections
+# ---------------------------------------------------------------------------
+
+
+class TestSurveySnapshot:
+    """Compare the current survey output against a stored snapshot.
+
+    The snapshot (tests/data/survey_snapshot.json) records, for every section,
+    the ordered list of question IDs, names, and answer types.  Any change —
+    count, order, renaming, type change, ID change — is reported per-section
+    so you can immediately see which sections were affected by a code change.
+
+    Workflow
+    --------
+    1. Run ``gen-survey-json.py`` to regenerate ``output/surveys/``.
+    2. Run ``pytest tests/test_survey_data.py::TestSurveySnapshot -v``.
+    3. If a section diff is *intentional* (you fixed that section), update the
+       snapshot:
+           conda run -n p312 python -m pytest tests/test_survey_data.py \\
+               --snapshot-update -v
+       or manually run:
+           conda run -n p312 python tests/test_survey_data.py --update-snapshot
+    4. If a section diff is *unintentional*, investigate — your change broke
+       a previously correct section.
+
+    Updating the snapshot
+    ---------------------
+    Pass ``--snapshot-update`` to pytest (handled by conftest) **or** run this
+    module directly with ``--update-snapshot``.
+    """
+
+    @pytest.fixture(scope="class")
+    def snapshot(self) -> dict[str, list[dict]]:
+        if not SNAPSHOT_PATH.exists():
+            pytest.skip(
+                f"Snapshot file not found at {SNAPSHOT_PATH}. "
+                "Generate it with: python tests/test_survey_data.py --update-snapshot"
+            )
+        with open(SNAPSHOT_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+        # The snapshot may be a list of section dicts (new format) or
+        # already a dict keyed by section name (old format).
+        if isinstance(raw, list):
+            result: dict[str, list[dict]] = {}
+            for sec in raw:
+                name = sec.get("name", "")
+                qs = sec.get("survey_data_proxy", [])
+                result[name] = [
+                    {
+                        "id": q["id"],
+                        "name": q["name"],
+                        "answer_type": q["answer_type"],
+                    }
+                    for q in qs
+                ]
+            return result
+        return raw
+
+    @pytest.fixture(scope="class")
+    def current(self, combined) -> dict[str, list[dict]]:
+        result: dict[str, list[dict]] = {}
+        for sec in combined:
+            name = sec.get("name", "")
+            qs = sec.get("survey_data_proxy", [])
+            result[name] = [
+                {
+                    "id": q["id"],
+                    "name": q["name"],
+                    "answer_type": q["answer_type"],
+                }
+                for q in qs
+            ]
+        return result
+
+    def test_no_sections_removed(self, snapshot, current):
+        """No section present in the snapshot should disappear."""
+        removed = set(snapshot.keys()) - set(current.keys())
+        assert removed == set(), f"Sections removed from output: {removed}"
+
+    def test_no_sections_added(self, snapshot, current):
+        """New sections should be added to the snapshot deliberately."""
+        added = set(current.keys()) - set(snapshot.keys())
+        assert added == set(), (
+            f"New sections not in snapshot: {added}. "
+            f"If intentional, update the snapshot."
+        )
+
+    def test_sections_unchanged(self, snapshot, current):
+        """Each section's question list must match the snapshot exactly.
+
+        Reports all changed sections in one failure message so you can
+        see the full impact of a code change at a glance.
+        """
+        diffs: list[str] = []
+
+        for section_name in sorted(snapshot.keys()):
+            snap_qs = snapshot[section_name]
+            curr_qs = current.get(section_name, [])
+
+            if snap_qs == curr_qs:
+                continue
+
+            lines: list[str] = [f"\n  Section: {section_name}"]
+
+            # Count change
+            if len(snap_qs) != len(curr_qs):
+                lines.append(f"    count: {len(snap_qs)} → {len(curr_qs)}")
+
+            # Detailed per-question diff
+            max_len = max(len(snap_qs), len(curr_qs))
+            for i in range(max_len):
+                sq = snap_qs[i] if i < len(snap_qs) else None
+                cq = curr_qs[i] if i < len(curr_qs) else None
+                if sq == cq:
+                    continue
+                if sq is None:
+                    lines.append(
+                        f"    [{i}] ADDED: {cq['id']}  "
+                        f"{cq['answer_type']:12s} {cq['name'][:60]}"
+                    )
+                elif cq is None:
+                    lines.append(
+                        f"    [{i}] REMOVED: {sq['id']}  "
+                        f"{sq['answer_type']:12s} {sq['name'][:60]}"
+                    )
+                else:
+                    changes = []
+                    if sq["id"] != cq["id"]:
+                        changes.append(f"id: {sq['id']} → {cq['id']}")
+                    if sq["name"] != cq["name"]:
+                        changes.append(
+                            f"name: {sq['name'][:40]!r} → {cq['name'][:40]!r}"
+                        )
+                    if sq["answer_type"] != cq["answer_type"]:
+                        changes.append(
+                            f"type: {sq['answer_type']} → {cq['answer_type']}"
+                        )
+                    lines.append(f"    [{i}] {'; '.join(changes)}")
+
+            diffs.append("\n".join(lines))
+
+        if diffs:
+            header = (
+                f"{len(diffs)} section(s) differ from snapshot.\n"
+                f"If intentional, update the snapshot with:\n"
+                f"  python tests/test_survey_data.py --update-snapshot\n"
+            )
+            pytest.fail(header + "\n".join(diffs))
+
+
+# ---------------------------------------------------------------------------
+# Snapshot update helper (run this module directly)
+# ---------------------------------------------------------------------------
+
+
+def _update_snapshot() -> None:
+    """Regenerate tests/data/survey_snapshot.json from current output."""
+    if not COMBINED_PATH.exists():
+        print(f"ERROR: {COMBINED_PATH} not found. Run gen-survey-json.py first.")
+        sys.exit(1)
+
+    with open(COMBINED_PATH, encoding="utf-8") as f:
+        combined = json.load(f)
+
+    snapshot: dict[str, list[dict]] = {}
+    for sec in combined:
+        name = sec.get("name", "")
+        qs = sec.get("survey_data_proxy", [])
+        snapshot[name] = [
+            {
+                "id": q["id"],
+                "name": q["name"],
+                "answer_type": q["answer_type"],
+            }
+            for q in qs
+        ]
+
+    SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(SNAPSHOT_PATH, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+    total = sum(len(v) for v in snapshot.values())
+    print(f"Updated {SNAPSHOT_PATH} — " f"{len(snapshot)} sections, {total} questions.")
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--update-snapshot" in sys.argv:
+        _update_snapshot()
+    else:
+        print(
+            "Usage:\n"
+            "  python tests/test_survey_data.py --update-snapshot\n"
+            "    Regenerate the snapshot from current survey output.\n"
+        )
